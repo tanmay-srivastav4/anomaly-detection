@@ -1,48 +1,102 @@
 import streamlit as st
-import joblib
+import pandas as pd
+import time
+import numpy as np
 from geopy.distance import geodesic
+import pydeck as pdk
 
-model = joblib.load('anomaly_detection_model.pkl')
-scaler = joblib.load('feature_scaler.pkl')
+# -----------------------------
+# Safe zone config
+# -----------------------------
+SAFE_CENTER = (27.3389, 88.6065)  # (lat, lon)
+SAFE_RADIUS_M = 20000  # 20 km in meters
 
+dangerous_areas = [
+    {'latitude': 27.9475, 'longitude': 88.3315},
+    {'latitude': 27.2200, 'longitude': 88.6020},
+    {'latitude': 27.3450, 'longitude': 88.8790},
+    {'latitude': 27.4205, 'longitude': 88.9314},
+    {'latitude': 27.4120, 'longitude': 88.9570},
+]
+
+# -----------------------------
+# Functions
+# -----------------------------
 def is_outside_safe_zone(lat, lon):
-    return 1 if geodesic((lat, lon), (27.3389, 88.6065)).km > 20 else 0
+    return 1 if geodesic((lat, lon), SAFE_CENTER).m > SAFE_RADIUS_M else 0
 
-def is_in_dangerous_area(lat, lon):
-    dangerous_areas = [
-        {'latitude': 27.9475, 'longitude': 88.3315},
-        {'latitude': 27.2200, 'longitude': 88.6020},
-        {'latitude': 27.3450, 'longitude': 88.8790},
-        {'latitude': 27.4205, 'longitude': 88.9314},
-        {'latitude': 27.4120, 'longitude': 88.9570},
-    ]
-    current_loc = (lat, lon)
-    for area in dangerous_areas:
-        if geodesic(current_loc, (area['latitude'], area['longitude'])).km <= 0.5:
-            return 1
-    return 0
+# -----------------------------
+# Streamlit UI
+# -----------------------------
+st.title("🌐 Real-Time Tourist Movement & Geofence SOS Alert")
 
-st.title("SurakshaTrack - Realtime Anomaly Prediction")
+trail = []
+lat, lon = SAFE_CENTER  # Start from safe zone center
 
-latitude = st.number_input("Latitude", value=27.3389)
-longitude = st.number_input("Longitude", value=88.6065)
-speed = st.number_input("Speed (km/h)", value=10.0)
-time_spent_in_zone = 300  # static for now
-distance_to_zone_center = geodesic((latitude, longitude), (27.3389, 88.6065)).meters
+for step in range(25):  # Move for 25 steps
+    # Tourist gradually moves northeast (0.01 deg per step)
+    lat += 0.01
+    lon += 0.01
+    trail.append([lon, lat])  # pydeck needs (lon, lat)
 
-near_dangerous_area = is_in_dangerous_area(latitude, longitude)
-outside_safe_zone = is_outside_safe_zone(latitude, longitude)
+    # Check safe zone status
+    outside_safe_zone = is_outside_safe_zone(lat, lon)
 
-features = [[speed, time_spent_in_zone, distance_to_zone_center, near_dangerous_area, outside_safe_zone]]
-features_scaled = scaler.transform(features)
-anomaly = model.predict(features_scaled)[0]
-predicted_sos = 1 if anomaly == -1 or near_dangerous_area == 1 or outside_safe_zone == 1 else 0
+    # Trail path
+    path_layer = pdk.Layer(
+        "PathLayer",
+        data=[{"path": trail}],
+        get_path="path",
+        get_color=[0, 100, 255],
+        width_scale=3,
+        width_min_pixels=2,
+    )
 
-st.write(f"Distance to Zone Center: {distance_to_zone_center:.2f} m")
-st.write(f"Near Dangerous Area: {'Yes' if near_dangerous_area else 'No'}")
-st.write(f"Outside Safe Zone: {'Yes' if outside_safe_zone else 'No'}")
+    # Current position marker
+    point_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=pd.DataFrame({"lon": [lon], "lat": [lat]}),
+        get_position='[lon, lat]',
+        get_color='[255, 0, 0]',
+        get_radius=300,
+    )
 
-if predicted_sos == 1:
-    st.error("🚨 ALERT: Anomaly or breach detected!")
-else:
-    st.success("✅ Everything normal. Tourist is safe.")
+    # Dangerous areas
+    danger_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=pd.DataFrame(dangerous_areas),
+        get_position='[longitude, latitude]',
+        get_color='[255, 50, 50]',
+        get_radius=500,
+    )
+
+    # Safe zone geofence (20 km circle)
+    geofence_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=pd.DataFrame({"lon": [SAFE_CENTER[1]], "lat": [SAFE_CENTER[0]]}),
+        get_position='[lon, lat]',
+        get_color='[0, 255, 0, 40]' if not outside_safe_zone else '[255, 0, 0, 60]',  
+        get_radius=SAFE_RADIUS_M,
+    )
+
+    view_state = pdk.ViewState(
+        latitude=lat,
+        longitude=lon,
+        zoom=9,
+        pitch=0
+    )
+
+    st.pydeck_chart(pdk.Deck(
+        layers=[path_layer, point_layer, danger_layer, geofence_layer],
+        initial_view_state=view_state
+    ))
+
+    # Alerts
+    if outside_safe_zone:
+        st.error("🚨 SOS ALERT! Tourist stepped OUTSIDE the safe zone!")
+        break  # Stop movement immediately once anomaly is triggered
+    else:
+        st.success("✅ Tourist is SAFE inside the zone.")
+
+    time.sleep(2)  # Simulate real-time movement
+    st.write("---")
